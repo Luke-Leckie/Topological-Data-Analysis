@@ -26,6 +26,7 @@ import warnings
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=FutureWarning)
 from sklearn.decomposition import PCA
+import gc
 
 import hypernetx as hnx  # Hypergraph library
 import itertools
@@ -36,8 +37,6 @@ from scipy.linalg import eigvalsh
 
 
 # In[3]:
-
-
 import gudhi as gd
 import gudhi.representations
 def compute_persistence_diagram(data):
@@ -94,7 +93,7 @@ def build_centroid_distance_matrix(data_with_centroid, centroid_index, large_val
 
     return dist_matrix
 
-def compute_persistence_centroid(data, max_edge_length=3.0, plotting=True):
+def compute_persistence_centroid(data, max_edge_length=4.0, plotting=True):
     """
     1) Compute the geometric centroid of 'data' and append it as an extra row.
     2) Build a distance matrix such that only the centroid can connect to other points.
@@ -185,7 +184,7 @@ def get_rips_time_centroid(df, embeddings='sentence_embeddings_pca', step=0.025,
             continue
         
         # Build the Rips Complex
-        rips_complex, simplex_tree,persistence= compute_persistence_centroid(embed,max_edge_length=ML,plotting=False)
+        rips_complex, simplex_tree,persistence= compute_persistence_centroid(embed,max_edge_length=MLC,plotting=False)
         births_dimD = []
         deaths_dimD = []
         
@@ -269,7 +268,13 @@ def compute_graph_metrics(G):
         "max_strength": np.nan,
         "mean_strength": np.nan,
         "fiedler_value": np.nan,
-        "largest_laplacian_eigenvalue": np.nan
+        "largest_laplacian_eigenvalue": np.nan,
+        'modularity_unw':np.nan,
+        'num_comms_unw':np.nan,
+        'num_comms':np.nan,
+        'modularity_leiden':np.nan,
+        'num_comms_leiden':np.nan,
+        'spectral_gap':np.nan
     }
 
     if not G or G.number_of_nodes() < 2:
@@ -314,7 +319,14 @@ def compute_graph_metrics(G):
     # Louvain Modularity (Weighted)
     comms = nx.community.louvain_communities(G, weight='inv_weight')
     metrics["modularity_louvain"] = nx.community.modularity(G, comms, weight='inv_weight')
-
+    metrics["num_comms"]=len(comms)
+    
+    comms_u = nx.community.louvain_communities(G, weight=None)
+    metrics["modularity_unw"] = nx.community.modularity(G, comms_u, weight=None)
+    metrics["num_comms_unw"]=len(comms_u)
+    #comms_leiden = leiden_communities(G, weight='inv_weight')
+   # metrics["modularity_leiden"] = nx.community.modularity(G, comms_leiden, weight='inv_weight')
+    #metrics["num_comms_leiden"] = len(comms_leiden)
     # Strength (Weighted Degree) (Max & Mean)
     strength = {node: sum(G[node][nbr].get('inv_weight', 1) for nbr in G[node]) for node in G.nodes()}
     metrics["max_strength"] = max(strength.values())
@@ -327,7 +339,7 @@ def compute_graph_metrics(G):
     if len(eigenvalues) > 1:  # Ensure there are at least two eigenvalues
         metrics["fiedler_value"] = eigenvalues[1]  # Second smallest eigenvalue (λ₂)
         metrics["largest_laplacian_eigenvalue"] = eigenvalues[-1]  # Largest eigenvalue (λ_max)
-
+        metrics["spectral_gap"] = eigenvalues[-1] - eigenvalues[1]  # λ_max - λ₂
     return metrics
 
 def compute_distribution_stats(births, deaths, persistences):
@@ -519,6 +531,7 @@ def get_rips_complex_G(df, embedding=str('sentence_embeddings')):
 
     for idx, row in df.iterrows():
         G=nx.Graph()
+        
         H = {}  # Hypergraph as a dictionary: {hyperedge_id: [vertices]}
         embed = row[embedding] 
         rips_complex = row['rt_rips']
@@ -545,7 +558,8 @@ def get_rips_complex_G(df, embedding=str('sentence_embeddings')):
                 fives.append(simplex)
 
                     
-                    
+   #     print(len(G.nodes()), 'nodes')
+#    print(len(embed), 'embed len')
         df['edges'].loc[idx]=len(edges2)
         df['tris'].loc[idx]=len(triangles)
         df['tetra'].loc[idx]=len(tetrahedrons)
@@ -557,7 +571,11 @@ def get_rips_complex_G(df, embedding=str('sentence_embeddings')):
     return df#df
 
     ####
+import psutil
 
+# Create a psutil Process object for memory checks
+process = psutil.Process()
+memory_threshold_mb=7000
 def get_rips_time(df, embeddings='sentence_embeddings', step=0.025):
     """
     For each row in df, build a Rips complex, extract dimension-D intervals
@@ -579,9 +597,8 @@ def get_rips_time(df, embeddings='sentence_embeddings', step=0.025):
     df[f'scales_dim2'] = None
     df[f'alive_dim2'] = None
     df['rt'] = None
-    df['simplex_tree']=None
     df["rt_rips"]=None
-    
+    df["rips"]=None
     for idx, row in df.iterrows():
         # Get the embeddings for this row
         embed = row[embeddings]
@@ -593,10 +610,21 @@ def get_rips_time(df, embeddings='sentence_embeddings', step=0.025):
             rips_complex = gd.RipsComplex(points=embed, max_edge_length=3, sparse=sparse_param)
         else:
             rips_complex = gd.RipsComplex(points=embed, max_edge_length=3)
+            
+        current_mem_mb = process.memory_info().rss / (1024 * 1024)
+    #    print('rips mem',idx, current_mem_mb)
         simplex_tree = rips_complex.create_simplex_tree(max_dimension=dims_simplex)
-
+        current_mem_mb = process.memory_info().rss / (1024 * 1024)
+     #   print('simplex mem', current_mem_mb)
+        if current_mem_mb > memory_threshold_mb:
+            continue
         # Extract dimension-D intervals from persistence
         persistence = simplex_tree.persistence()
+        
+        current_mem_mb = process.memory_info().rss / (1024 * 1024)
+   #     print('persistence mem', current_mem_mb)
+        if current_mem_mb > memory_threshold_mb:
+            continue
         for D in [0,1,2]:
             births_dimD = []
             deaths_dimD = []
@@ -610,15 +638,18 @@ def get_rips_time(df, embeddings='sentence_embeddings', step=0.025):
             scales, alive_components = get_alive_components_over_scales(births_dimD, deaths_dimD, step=step)
             if len(deaths_dimD)>0:
                 df.at[idx, f"rt"] = max(deaths_dimD)
-
             # Store these lists in the new columns
             df.at[idx, f"scales_dim{D}"] = scales
             df.at[idx, f"alive_dim{D}"] = alive_components
-        rips_complex_max = gd.RipsComplex(points=embed, max_edge_length=df["rt"].loc[idx])
-        simplex_tree_max = rips_complex.create_simplex_tree(max_dimension=dims_simplex)
-        df.at[idx, f"simplex_tree"] = simplex_tree
-        df.at[idx, f"rt_simplex_tree"] = simplex_tree_max
+        rips_complex_max = gd.RipsComplex(points=embed, max_edge_length=df["rt"].loc[idx], \
+                                          sparse=sparse_param)
+        current_mem_mb = process.memory_info().rss / (1024 * 1024)
+      #  print('rips max mem', current_mem_mb)
+#         if current_mem_mb > memory_threshold_mb:
+#             continue
+        #simplex_tree_max = rips_complex.create_simplex_tree(max_dimension=dims_simplex)
         df.at[idx, f"rt_rips"] = rips_complex_max
+        df.at[idx, f"rips"] = rips_complex
 
     return df
 
@@ -688,19 +719,13 @@ def get_simplices_over_time(df, max_dimension=4,simplex_tree_type='rt_simplex_tr
 # In[4]:
 
 
-# 3) Define a helper function to transform a single row's embeddings
-embeddings='sentence_embeddings'
-ML=3
-reduce_dims=False
-SPARSE=True
-sparse_param=0.5
-dims_simplex=3
-chunk_size=200
 
-if SPARSE:
-    SP=f'sparse_{sparse_param}_'
-else:
-    SP=''
+threshold=244
+# infile = open(f'/home/ll16598/Documents/POSTDOC/Context-DATM/sentenceBERT_cluster_dicts_{window}_{embedding_step}/cluster_dictionary_{save_thresh}','rb')
+# cluster_dictionary=pickle.load(infile)
+# infile.close()
+test_mode=False
+plot=False
 if test_mode:
     save=False
 else:
@@ -716,14 +741,12 @@ user='cluster'
 if user=='luke':
     working_dir='/home/ll16598/Documents/POSTDOC/'
     dir_atom_dfs='/home/ll16598/Documents/POSTDOC/TDA/TDA_cluster/atom_assigned_dfs'
-
+    dir_array='/home/ll16598/Documents/POSTDOC/TDA/TDA_cluster/window_vectors'
 elif user=='cluster':
     working_dir='/N/u/lleckie/Quartz/work/TDA_cluster/'
+    dir_atom_dfs=working_dir+'final_dfs'
+    dir_array=working_dir+'window_vectors'
 
-
-dir_atom_dfs=working_dir+'atom_assigned_dfs'
-
-dir_array=working_dir+'vector_assigned_dfs'
 
 #df_drug=pd.read_csv(f'.{}/df_monolog_{threshold}.csv')
 
@@ -731,46 +754,85 @@ dir_array=working_dir+'vector_assigned_dfs'
 # In[5]:
 
 
-df_monologs=pd.read_csv(f'{dir_atom_dfs}/df_monolog_{threshold}.csv')
-df_SER2=pd.read_csv(f'{dir_atom_dfs}/df_SER2_{threshold}.csv')
-df_PEM=pd.read_csv(f'{dir_atom_dfs}/df_PEM.csv')
+df_monologs=pd.read_csv(f'{dir_atom_dfs}/SER_monologs.csv')
+df_SER2=pd.read_csv(f'{dir_atom_dfs}/SER_IPSP.csv')
+df_PEM=pd.read_csv(f'{dir_atom_dfs}/PEM_df.csv')
 df_SER_MA=pd.read_csv(f'{dir_atom_dfs}/SER1.csv')
-
-
+df_MASM=pd.read_csv(f'{dir_atom_dfs}/MASM.csv')
+df_DEI=pd.read_csv(f'{dir_atom_dfs}/cleaned_DEI.csv')
 # In[ ]:
 
 import sys
-
+import gc
+import shutil
+from tqdm import tqdm
+tqdm.pandas()
 
 overlap = float(sys.argv[1])
-window = int(sys.argv[2])
+span = int(sys.argv[2])
 df_name = sys.argv[3]
-df_names=['SER_IPSP', 'SER1','PEM_df', 'SER_monologs']
+
+df_names=['SER_IPSP', 'SER1','PEM_df', 'SER_monologs', 'MASM','cleaned_DEI']
+dfs1=[df_SER2, df_SER_MA,df_PEM,df_monologs,df_MASM,df_DEI]
+dfs=dfs1.copy()
+
 embeddings='sentence_embeddings'
 df_index = df_names.index(df_name)
+df_monolog=dfs[df_index]
 data_save_dir=working_dir+'TDA_output/'
 os.makedirs(data_save_dir, exist_ok=True)
 
+
+pooling_method='mean'
+if pooling_method=='max':
+    ML=5
+else:
+    ML=3
+    MLC=5
+embeddings='sentence_embeddings'
+reduce_dims=True
+SPARSE=True
+
+dims_simplex=3
+chunk_size=4
+step_sparsities=[0]
+dim_reduction=50
+sparse_param=0.5
+if span==10:
+    dim_reduction=25
+    sparse_param=0.75
+
+
+
 completed_files=os.listdir(data_save_dir)
-# for overlap in [0.1,0.2,0.4]:
-#     for window in [60,80,100,120,140,160,180,200]:
 
-# for overlap in [0.1,0.2,0.4]:
-#     for window in [60,80,100,120,140,160,180,200]:
 dims_simplex=3        
-
-step=int(window*overlap)#4
+chunk_size=5
+step=int(span*overlap)#4
 layers='last'
 
-dfs=[df_SER2, df_SER_MA,df_PEM,df_monologs]
-df_monolog=dfs[df_index]
-newfilename=f'{df_name}_{window}_{step}_TDA_results.csv'
+
+
+
 #             if newfilename in completed_files:
 #                 print(f'Already completed {newfilename}')
 #                 continue
+data_save_dir_name=working_dir+f'TDA_output/{df_name}_{span}_{pooling_method}_{dim_reduction}/'
+if os.path.exists(data_save_dir_name):
+    shutil.rmtree(data_save_dir_name)  # Deletes the entire directory and its contents
+os.makedirs(data_save_dir_name, exist_ok=True)
 
-with open(f'{dir_array}/{window}_{step}_{df_name}_sentence_embeddings_arrays.pkl', 'rb') as f:
-    df_monolog['sentence_embeddings'] = pickle.load(f)
+with open(f'{dir_array}/{span}_{step}_{df_name}_sentence_embeddings_arrays.pkl', 'rb') as f:
+    embeds= pickle.load(f)
+    
+print(len(embeds))
+print(len(df_monolog))    
+if len(embeds)!=len(df_monolog):
+    raise Exception('MISMATCH IN LENGTH')
+
+df_monolog['sentence_embeddings'] = embeds
+df_monolog['length'] = [len(i) for i in embeds]
+
 if test_mode:
     df_monolog=df_monolog[0:10]
 df_monolog = df_monolog[
@@ -783,165 +845,104 @@ df_monolog = df_monolog[
     )]
 
 if reduce_dims:
+    print('reducing dims')
     all_vecs = []
     for row in df_monolog['sentence_embeddings']:
         arr = np.array(row)  
         all_vecs.append(arr)
     big_matrix = np.concatenate(all_vecs, axis=0)
-    pca = PCA(n_components=50)
+    pca = PCA(n_components=dim_reduction, random_state=42)
     pca.fit(big_matrix)
     def transform_embeddings(emb_list):
         emb_array = np.array(emb_list)   # shape (k_i, 384)
         emb_pca = pca.transform(emb_array)  # shape (k_i, 50)
         return emb_pca
     df_monolog['sentence_embeddings'] = df_monolog['sentence_embeddings'].apply(transform_embeddings)
-
-drugs=list(set(df_monolog['Drug']))
-Participants=list(set(df_monolog['Participant']))
-
+ 
 df_monolog['token_embeddings']=None
-print('performing TDA on ',df_name, ' window: ', window, 'step: ', step)
+print('performing TDA on ',df_name, ' span: ', span)#, 'step: ', step)
+cn=0
+for fi in tqdm(range(0, len(df_monolog), chunk_size), desc="Processing Chunks"):
+    cn+=1
+    if fi+chunk_size>=len(df_monolog):
+        df_subset=df_monolog[fi:].reset_index(drop=True)
+    else:
+        df_subset=df_monolog[fi:fi+chunk_size].reset_index(drop=True)
+
+
+   # drugs=list(set(df_subset['Drug']))
+    #Participants=list(set(df_subset['Participant']))
+    df_subset=get_rips_time(df_subset,embeddings=embeddings)
+   # df_subset=get_rips_time_centroid(df_subset,embeddings=embeddings)
+    #df_monolog=get_simplices_over_time(df_monolog,simplex_tree_type='simplex_tree')
+    #print('got RIPS')
+    df_with_graph=get_rips_complex_G(df_subset)
+    #print('got G')
+    #df_with_graph['euler'] = df_with_graph['rt_simplex_tree'].apply(lambda st: compute_euler_characteristic(st, max_dim=4))
+    # Apply the function to each graph in df_with_graph
+    graph_metrics = df_with_graph['graph'].apply(compute_graph_metrics)
+    graph_metrics_df = pd.DataFrame(graph_metrics.tolist())
+    df_with_graph = pd.concat([df_with_graph, graph_metrics_df], axis=1)
+                # Create a new DataFrame
+
+    # We'll accumulate new rows in a list of dicts
+    new_rows = []
+    dimensions = [0, 1, 2]
+
+    for idx, row in df_with_graph.iterrows():
+        embed = row[embeddings]  # Adjust as needed
+        # We’ll store births, deaths, pers LENGTHS in a dict keyed by dimension
+        dim_dict = {
+            dim: {'births': [], 'deaths': [], 'pers': []}
+            for dim in dimensions
+        }
 
 
 
-df_monolog=get_rips_time(df_monolog,embeddings=embeddings)
-df_monolog=get_rips_time_centroid(df_monolog,embeddings=embeddings)
-print('completed rips')
-#df_monolog=get_simplices_over_time(df_monolog,simplex_tree_type='simplex_tree')
-
-
-
-# Assuming df_monolog is your DataFrame and data_save_dir, df_name, window, and step are defined.
-# For each dimension (2, 3, 4) we explode the corresponding columns and then group by Drug and filtration values.
-
-for D in [2, 3, 4]:
-    # Explode the lists in the columns for the current dimension.
-    try:
-        df_exploded = df_monolog.explode([f"simplex_time_dim{D}_filtration", f"simplex_time_dim{D}_count"])
-    except Exception as e:
-        continue
-        
-   
-
-    # Convert the exploded columns to numeric.
-    df_exploded[f"simplex_time_dim{D}_filtration"] = pd.to_numeric(df_exploded[f"simplex_time_dim{D}_filtration"])
-    df_exploded[f"simplex_time_dim{D}_count"] = pd.to_numeric(df_exploded[f"simplex_time_dim{D}_count"])
-
-    # Group by "Drug" and the filtration values, and compute the mean and standard error for the counts.
-    grouped = df_exploded.groupby(["Drug", f"simplex_time_dim{D}_filtration"], as_index=False).agg(
-        alive_mean=(f"simplex_time_dim{D}_count", "mean"),
-        alive_se=(f"simplex_time_dim{D}_count", sem)  # standard error
-    )
-    if save:
-        df_exploded.to_csv(data_save_dir + f'{df_name}_{window}_{step}_{D}_skeleton_simplices_over_time.csv', index=False)
-
-
-    if plot:
-        import matplotlib.pyplot as plt
-        # Create a plot for the current dimension.
-        fig, ax = plt.subplots(figsize=(8, 6))
-
-        # Iterate over each drug group and plot mean ± SE.
-        for drug_level, df_sub in grouped.groupby("Drug"):
-            ax.errorbar(
-                df_sub[f"simplex_time_dim{D}_filtration"],
-                df_sub["alive_mean"],
-                yerr=df_sub["alive_se"],
-                label=f"Drug={drug_level}",
-                marker='o',
-                capsize=3
-            )
-
-        ax.set_xlabel("Filtration Value (Distance Threshold)")
-        ax.set_ylabel("Number of Alive Components (Mean ± SE)")
-        ax.set_title(f"Dimension {D} Alive Components Over Filtration Value by Drug")
-        ax.legend()
-        plt.show()
-
-for D in [0,1,2]:
-    df_exploded = df_monolog.explode([f"scales_dim{D}", f'alive_dim{D}'])
-    df_exploded[f"scales_dim{D}"] = pd.to_numeric(df_exploded[f"scales_dim{D}"])
-    df_exploded[f'alive_dim{D}'] = pd.to_numeric(df_exploded[f'alive_dim{D}'])
-    grouped = df_exploded.groupby(["Drug", f"scales_dim{D}"], as_index=False).agg(
-        alive_mean=(f'alive_dim{D}', "mean"),
-        alive_se=(f'alive_dim{D}', sem)  # standard error
-    )
-    df_exploded.to_csv(data_save_dir+f'{df_name}_{window}_{step}_{D}_simplices_over_time.csv')
-    if plot:
-
-        fig, ax = plt.subplots(figsize=(8,6))
-
-        # We'll iterate over each drug and plot mean ± SE
-        for drug_level, df_sub in grouped.groupby("Drug"):
-            ax.errorbar(
-                df_sub[f"scales_dim{D}"], 
-                df_sub["alive_mean"], 
-                yerr=df_sub["alive_se"], 
-                label=f"Drug={drug_level}",
-                marker='o',
-                capsize=3
-            )
-
-        ax.set_xlabel("Scale (distance threshold)")
-        ax.set_ylabel("Number of Alive Components (Mean ± SE)")
-        ax.set_title("Connected Components Over Scale by Drug")
-        ax.legend()
-        plt.show()
-
-df_with_graph=get_rips_complex_G(df_monolog)
-df_with_graph['euler'] = df_with_graph['rt_simplex_tree'].apply(lambda st: compute_euler_characteristic(st, max_dim=4))
-# Apply the function to each graph in df_with_graph
-graph_metrics = df_with_graph['graph'].apply(compute_graph_metrics)
-graph_metrics_df = pd.DataFrame(graph_metrics.tolist())
-df_with_graph = pd.concat([df_with_graph, graph_metrics_df], axis=1)
-
-dimensions = [0, 1, 2]
-
-# We'll accumulate new rows in a list of dicts
-new_rows = []
-
-for idx, row in df_with_graph.iterrows():
-    embed = row[embeddings]  # Adjust as needed
-    # We’ll store births, deaths, pers LENGTHS in a dict keyed by dimension
-    dim_dict = {
-        dim: {'births': [], 'deaths': [], 'pers': []}
-        for dim in dimensions
-    }
-
-    
-        
-    # Build the Rips Complex for *this row only*
-    rips_complex = gd.RipsComplex(points=embed, max_edge_length=3.0)
-    persistence = simplex_tree.persistence()
-
-    # Collect intervals by dimension
-    for dim, (b, d) in persistence:
-        if d == float('inf'):
+        # Build the Rips Complex for *this row only*
+        rips_complex =row['rips']
+        try:
+            simplex_tree = \
+            rips_complex.create_simplex_tree(max_dimension=dims_simplex)
+        except Exception as e:
             continue
-        if dim in dimensions:
-            dim_dict[dim]['births'].append(b)
-            dim_dict[dim]['deaths'].append(d)
-            dim_dict[dim]['pers'].append(d - b)
-            
-            
-    row_dict = row.to_dict()  # Start with original row's columns
+        persistence = simplex_tree.persistence()
 
-    for dim in dimensions:
-        bdp = dim_dict[dim]
-        stats_dict = compute_distribution_stats(bdp['births'], bdp['deaths'], bdp['pers'])
-        # prefix each stat key with dim
-        for stat_key, stat_val in stats_dict.items():
-            row_dict[f"{stat_key}_dim{dim}"] = stat_val
+        # Collect intervals by dimension
+        for dim, (b, d) in persistence:
+            if d == float('inf'):
+                continue
+            if dim in dimensions:
+                dim_dict[dim]['births'].append(b)
+                dim_dict[dim]['deaths'].append(d)
+                dim_dict[dim]['pers'].append(d - b)
 
-    # Add row_dict to new_rows
-    new_rows.append(row_dict)
 
-# Create a new DataFrame
-print('completed',f'{df_name}_{window}_{step}')
-df_with_tda = pd.DataFrame(new_rows)
-if reduce_dims:
-    df_with_tda.to_csv(data_save_dir + f'D50_{SP}{df_name}_{window}_{step}_TDA_results.csv')
-else:
-    df_with_tda.to_csv(data_save_dir + f'{SP}{df_name}_{window}_{step}_TDA_results.csv')
-print(f'completed! {df_name} window: {window} step size: {step}')
+        row_dict = row.to_dict()  # Start with original row's columns
+
+        for dim in dimensions:
+            bdp = dim_dict[dim]
+            stats_dict = compute_distribution_stats(bdp['births'], bdp['deaths'], bdp['pers'])
+            # prefix each stat key with dim
+            for stat_key, stat_val in stats_dict.items():
+                row_dict[f"{stat_key}_dim{dim}"] = stat_val
+
+        # Add row_dict to new_rows
+        new_rows.append(row_dict)
+
+    # Create a new DataFrame
+    df_with_tda = pd.DataFrame(new_rows)
+    df_with_tda.to_csv(data_save_dir_name + f'{df_name}_{fi}_{span}_TDA_results.csv')
+    del df_subset
+    del df_with_graph
+    gc.collect()
+print(f'completed! {df_name} span: {span}')
+list_files=sorted(os.listdir(data_save_dir_name))
+ddfs=[]
+for f in list_files:
+    ddfs.append(pd.read_csv(data_save_dir_name+f))
+data=pd.concat(ddfs)
+data.to_csv(data_save_dir+f'{df_name}_{span}_{pooling_method}_{dim_reduction}_window_TDA_results.csv')
+
+
 
